@@ -14,6 +14,63 @@ IMAP_SINCE_DAYS      = int(os.environ.get("IMAP_SINCE_DAYS", "7"))  # look back 
 
 notion = Client(auth=NOTION_TOKEN)
 
+def debug_database_schema():
+    """Debug function to print the database schema and status options"""
+    try:
+        db_info = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        print("=== DATABASE SCHEMA ===")
+        for prop_name, prop_config in db_info["properties"].items():
+            print(f"Property: '{prop_name}'")
+            print(f"  Type: {prop_config['type']}")
+            if prop_config['type'] in ['select', 'status']:
+                options = prop_config.get(prop_config['type'], {}).get('options', [])
+                print(f"  Options: {[opt['name'] for opt in options]}")
+            print()
+        return db_info
+    except Exception as e:
+        print(f"Error retrieving database schema: {e}")
+        return None
+
+def get_valid_status_options():
+    """Get the valid status options from the database"""
+    try:
+        db_info = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        status_prop = None
+        for prop_name, prop_config in db_info["properties"].items():
+            if prop_name == "Application Status" and prop_config['type'] == 'status':
+                status_prop = prop_config
+                break
+        
+        if status_prop:
+            options = status_prop.get('status', {}).get('options', [])
+            return [opt['name'] for opt in options]
+        return []
+    except Exception as e:
+        print(f"Error getting status options: {e}")
+        return []
+
+def validate_status(status):
+    """Check if the status is valid and return a valid alternative if not"""
+    valid_options = get_valid_status_options()
+    if not valid_options:
+        print("WARNING: Could not retrieve valid status options, using original status")
+        return status
+    
+    if status in valid_options:
+        return status
+    
+    print(f"WARNING: Status '{status}' not found in valid options: {valid_options}")
+    # Try to find a close match
+    status_lower = status.lower()
+    for option in valid_options:
+        if status_lower in option.lower() or option.lower() in status_lower:
+            print(f"Using closest match: '{option}'")
+            return option
+    
+    # Default to first available option
+    print(f"Using default status: '{valid_options[0]}'")
+    return valid_options[0]
+
 # --- helpers ---
 def get_text_from_message(msg):
     """Return best-effort plain text from an email.message.Message."""
@@ -55,8 +112,8 @@ def get_text_from_message(msg):
 # --- subject lines to status mapping ---
 SUBJECT_RULES = [
     (re.compile(r"thanks for applying|application received|we received your application", re.I), "Applied"),
-    (re.compile(r"interview|phone screen|assessment|coding challenge", re.I), "Interview"),
-    (re.compile(r"offer", re.I), "Offer"),
+    (re.compile(r"interview|phone screen|assessment|coding challenge", re.I), "Interview Scheduled"),
+    (re.compile(r"offer", re.I), "Offer Received"),
     (re.compile(r"not move forward|reject|regret|declined|unsuccessful", re.I), "Rejected"),
 ]
 
@@ -94,7 +151,7 @@ def derive_status(subject, body):
     for rx, status in SUBJECT_RULES:
         if rx.search(subject) or rx.search(body):
             return status
-    return "Saved"  # default if nothing matches
+    return "Not Applied Yet"  # default if nothing matches
 
 def find_existing(url=None, company=None, role=None):
     ors = []
@@ -112,10 +169,14 @@ def find_existing(url=None, company=None, role=None):
     return resp["results"][0]["id"] if resp["results"] else None
 
 def upsert(company, role, status, url=None, applied_on=None, location=None, notes=None):
+    # Validate and potentially correct the status
+    validated_status = validate_status(status)
+    print(f"DEBUG: Original status: '{status}', Validated status: '{validated_status}'")
+    
     props = {
         "Company Name": {"title": [{"text": {"content": company or "(unknown company)"}}]},
         "Role / Position": {"rich_text": [{"text": {"content": role or "(unknown role)"}}]},
-        "Application Status": {"select": {"name": status}},
+        "Application Status": {"status": {"name": validated_status}},
     }
     if url:         props["Application Link / Portal"] = {"url": url}
     if applied_on:  props["Application Date"] = {"date": {"start": applied_on}}
@@ -123,12 +184,32 @@ def upsert(company, role, status, url=None, applied_on=None, location=None, note
     if notes:       props["Notes"] = {"rich_text": [{"text": {"content": notes[:1900]}}]}
 
     page_id = find_existing(url=url, company=company, role=role)
-    if page_id:
-        notion.pages.update(page_id=page_id, properties=props)
-        return "updated"
-    else:
-        notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
-        return "created"
+    try:
+        if page_id:
+            notion.pages.update(page_id=page_id, properties=props)
+            return "updated"
+        else:
+            notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
+            return "created"
+    except Exception as e:
+        print(f"ERROR: Failed to upsert {company=} {role=} {status=}")
+        print(f"Error details: {e}")
+        # Try with a fallback status if the original status failed
+        if "status" in str(e).lower():
+            fallback_status = validate_status("Applied")
+            print(f"Attempting fallback with status '{fallback_status}'...")
+            props["Application Status"] = {"status": {"name": fallback_status}}
+            try:
+                if page_id:
+                    notion.pages.update(page_id=page_id, properties=props)
+                    return "updated (fallback)"
+                else:
+                    notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
+                    return "created (fallback)"
+            except Exception as e2:
+                print(f"Fallback also failed: {e2}")
+                return "failed"
+        return "failed"
 
 def fetch_recent_emails():
     print("DEBUG: IMAP_USER present?", bool(os.environ.get("IMAP_USER")))
@@ -164,10 +245,11 @@ def fetch_recent_emails():
         url_match = re.search(r"https?://\S+", body)
         url = url_match.group(0) if url_match else None
 
-        applied_on = datetime.date.today().isoformat() if status in ("Applied", "Saved") else None
+        applied_on = datetime.date.today().isoformat() if status in ("Applied", "Not Applied Yet") else None
         result = upsert(company, role, status, url=url, applied_on=applied_on, notes=subject)
         print(f"{result}: {company=} {role=} {status=} {url=}")
     M.logout()
 
 if __name__ == "__main__":
+    debug_database_schema()
     fetch_recent_emails()
