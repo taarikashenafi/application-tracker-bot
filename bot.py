@@ -10,7 +10,7 @@ IMAP_HOST            = os.environ.get("IMAP_HOST", "imap.gmail.com")
 IMAP_USER            = os.environ["IMAP_USER"]          # your full email
 IMAP_PASS            = os.environ["IMAP_PASS"]          # app password (Gmail) or account password (IMAP)
 IMAP_FOLDER          = os.environ.get("IMAP_FOLDER", "INBOX")
-IMAP_SINCE_DAYS      = int(os.environ.get("IMAP_SINCE_DAYS", "7"))  # look back n days each run
+IMAP_SINCE_DAYS      = int(os.environ.get("IMAP_SINCE_DAYS", "30"))  # look back n days each run
 
 notion = Client(auth=NOTION_TOKEN)
 
