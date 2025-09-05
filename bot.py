@@ -1,6 +1,7 @@
 # bot.py
 # pip install: notion-client python-dotenv
 import os, imaplib, email, re, datetime
+from email.header import decode_header, make_header
 from notion_client import Client
 
 NOTION_TOKEN         = os.environ["NOTION_TOKEN"]
@@ -12,6 +13,44 @@ IMAP_FOLDER          = os.environ.get("IMAP_FOLDER", "INBOX")
 IMAP_SINCE_DAYS      = int(os.environ.get("IMAP_SINCE_DAYS", "7"))  # look back n days each run
 
 notion = Client(auth=NOTION_TOKEN)
+
+# --- helpers ---
+def get_text_from_message(msg):
+    """Return best-effort plain text from an email.message.Message."""
+    # Prefer text/plain
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if ctype == "text/plain":
+                try:
+                    return part.get_payload(decode=True).decode(errors="ignore")
+                except Exception:
+                    pass
+        # fallback to first text/html
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                try:
+                    html = part.get_payload(decode=True).decode(errors="ignore")
+                    # very light html-to-text fallback
+                    text = re.sub(r"<[^>]+>", " ", html)
+                    text = re.sub(r"\s+", " ", text)
+                    return text.strip()
+                except Exception:
+                    pass
+    else:
+        ctype = msg.get_content_type()
+        try:
+            payload = msg.get_payload(decode=True)
+            if payload is None:
+                return ""
+            text = payload.decode(errors="ignore")
+            if ctype == "text/html":
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = re.sub(r"\s+", " ", text)
+            return text
+        except Exception:
+            return ""
+    return ""
 
 # --- subject lines to status mapping ---
 SUBJECT_RULES = [
@@ -92,9 +131,16 @@ def upsert(company, role, status, url=None, applied_on=None, location=None, note
         return "created"
 
 def fetch_recent_emails():
+    print("DEBUG: IMAP_USER present?", bool(os.environ.get("IMAP_USER")))
+    print("DEBUG: IMAP_PASS length:", len(os.environ.get("IMAP_PASS", "")))
     since_date = (datetime.date.today() - datetime.timedelta(days=IMAP_SINCE_DAYS)).strftime("%d-%b-%Y")
     M = imaplib.IMAP4_SSL(IMAP_HOST)
-    M.login(IMAP_USER, IMAP_PASS)
+    try:
+        M.login(IMAP_USER, IMAP_PASS)
+    except imaplib.IMAP4.error as e:
+        print("ERROR: IMAP authentication failed.")
+        print("HINT: Ensure IMAP is enabled in Gmail, IMAP_USER matches the account that created the App Password, and IMAP_PASS is the 16-char app password with no spaces.")
+        raise
     M.select(IMAP_FOLDER)
     # narrow subjects you care about; edit as you like:
     search_query = f'(SINCE {since_date})'
@@ -104,23 +150,12 @@ def fetch_recent_emails():
         typ, msg_data = M.fetch(eid, "(RFC822)")
         if typ != "OK": continue
         msg = email.message_from_bytes(msg_data[0][1])
-        subj = email.header.make_header(email.header.decode_header(msg.get("Subject") or ""))
-        subject = str(subj)
+        subject = str(make_header(decode_header(msg.get("Subject") or "")))
         # only consider likely application emails:
         if not re.search(r"apply|application|interview|assessment|offer|declin|reject|next steps|thanks", subject, re.I):
             continue
 
-        # get body (plain text best)
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ctype = part.get_content_type()
-                if ctype == "text/plain":
-                    body = part.get_payload(decode=True).decode(errors="ignore")
-                    break
-        else:
-            if msg.get_content_type() == "text/plain":
-                body = msg.get_payload(decode=True).decode(errors="ignore")
+        body = get_text_from_message(msg)
 
         status = derive_status(subject, body)
         company, role = parse_company_and_role(subject, body)
