@@ -447,6 +447,8 @@ def fetch_recent_emails():
             r"your.*application.*has.*been.*received"
         ]
         
+        body = get_text_from_message(msg)
+        
         # Check if this is an application confirmation email
         is_application_email = False
         for pattern in application_confirmations:
@@ -465,8 +467,6 @@ def fetch_recent_emails():
             "externship", "admissions", "course", "class", "petscreening"
         ]):
             continue
-
-        body = get_text_from_message(msg)
 
         status = derive_status(subject, body)
         company, role = parse_company_and_role(subject, body, sender)
