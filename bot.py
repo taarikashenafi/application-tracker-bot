@@ -121,15 +121,15 @@ SUBJECT_RULES = [
     (re.compile(r"interview.*scheduled|phone screen|assessment.*scheduled|coding challenge.*scheduled|interview.*invite", re.I), "Interview Scheduled"),
     (re.compile(r"interview|phone screen|assessment|coding challenge|technical interview|behavioral interview", re.I), "Interview Scheduled"),
     
-    # Application confirmation patterns
-    (re.compile(r"thanks for applying|application received|we received your application|application.*submitted|application.*confirmed", re.I), "Applied"),
+    # Application confirmation patterns (most common for job application emails)
+    (re.compile(r"we.*received.*your.*application|thank.*you.*for.*your.*application|application.*received|we.*received.*your.*job.*application|thank.*you.*for.*your.*online.*submission|we.*received.*your.*submission|application.*submitted|your.*application.*has.*been.*received", re.I), "Applied"),
     
     # In progress patterns
     (re.compile(r"next steps|moving forward|under review|in review|being considered|application.*review", re.I), "In Progress"),
 ]
 
 def parse_company_and_role(subject, body, sender=""):
-    """Extract company and role with better accuracy"""
+    """Extract company and role from job application confirmation emails"""
     company = None
     role = None
     
@@ -137,70 +137,81 @@ def parse_company_and_role(subject, body, sender=""):
     clean_subject = re.sub(r"^(re:|fwd?:|fw:)\s*", "", subject, flags=re.I).strip()
     clean_subject = re.sub(r"\s*\[.*?\]\s*$", "", clean_subject).strip()
     
-    # Extract company from sender email domain first (most reliable)
+    # Method 1: Extract from sender email domain (most reliable for job apps)
     if sender:
-        domain_match = re.search(r"@([^.]+)\.", sender.lower())
-        if domain_match:
-            domain = domain_match.group(1)
-            # Skip generic domains
-            if domain not in ["gmail", "yahoo", "hotmail", "outlook", "linkedin", "indeed", "glassdoor", "hubspot", "mailchimp"]:
-                company = domain.title()
-                # Handle common company name variations
-                company = re.sub(r"noreply|no-reply|careers|jobs|hr|talent", "", company, flags=re.I).strip()
-                if company:
-                    company = company.title()
+        # Handle common job application email patterns
+        sender_lower = sender.lower()
+        
+        # Direct company emails (e.g., "JPMorgan Chase & Co.")
+        if "& co" in sender_lower or "corp" in sender_lower or "inc" in sender_lower:
+            company = sender.title()
+            # Clean up common suffixes
+            company = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company|& co\.?)$", "", company, flags=re.I)
+        else:
+            # Extract from domain
+            domain_match = re.search(r"@([^.]+)\.", sender_lower)
+            if domain_match:
+                domain = domain_match.group(1)
+                # Skip generic domains
+                if domain not in ["gmail", "yahoo", "hotmail", "outlook", "linkedin", "indeed", "glassdoor", "hubspot", "mailchimp", "myworkday", "workday"]:
+                    company = domain.title()
+                    # Handle common company name variations
+                    company = re.sub(r"noreply|no-reply|careers|jobs|hr|talent", "", company, flags=re.I).strip()
+                    if company:
+                        company = company.title()
     
-    # Look for company name in email body (more reliable than subject)
+    # Method 2: Extract from email body (look for company names in application confirmations)
     if not company:
         company_patterns = [
+            r"([A-Z][a-zA-Z\s&\.]+?)\s+team",
+            r"([A-Z][a-zA-Z\s&\.]+?)\s+talent",
+            r"([A-Z][a-zA-Z\s&\.]+?)\s+recruiting",
+            r"([A-Z][a-zA-Z\s&\.]+?)\s+hr",
             r"at\s+([A-Z][a-zA-Z\s&\.]+?)(?:\s|$|,|\.|!)",
             r"from\s+([A-Z][a-zA-Z\s&\.]+?)(?:\s|$|,|\.|!)",
-            r"Company:\s*([^\n\r,]+)",
-            r"Organization:\s*([^\n\r,]+)",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+is\s+hiring",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+team"
+            r"([A-Z][a-zA-Z\s&\.]+?)\s+and\s+co",
+            r"([A-Z][a-zA-Z\s&\.]+?)\s+corporation"
         ]
         
         for pattern in company_patterns:
             match = re.search(pattern, body, re.I)
             if match:
                 potential_company = match.group(1).strip()
-                # Filter out common false positives and clean up
+                # Filter out common false positives
                 if (len(potential_company) > 2 and 
-                    potential_company.lower() not in ["the", "a", "an", "and", "or", "but", "our", "your", "this", "that"] and
-                    not re.search(r"^(great|good|wonderful|amazing)", potential_company, re.I)):
+                    potential_company.lower() not in ["the", "a", "an", "and", "or", "but", "our", "your", "this", "that", "warm", "hello"] and
+                    not re.search(r"^(great|good|wonderful|amazing|thank)", potential_company, re.I)):
                     company = potential_company
                     break
     
-    # Extract role from email body (more reliable than subject)
+    # Method 3: Extract role from subject line (common in job application emails)
     role_patterns = [
-        r"Position:\s*([^\n\r,]+)",
-        r"Role:\s*([^\n\r,]+)",
-        r"Job Title:\s*([^\n\r,]+)",
-        r"for the\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|!)",
-        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist))",
-        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist))\s+position"
+        r"for the\s+([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))",
+        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))\s+position",
+        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))\s+intern",
+        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))\s+role"
     ]
     
     for pattern in role_patterns:
-        match = re.search(pattern, body, re.I)
+        match = re.search(pattern, clean_subject, re.I)
         if match:
             potential_role = match.group(1).strip()
             if len(potential_role) > 3 and len(potential_role) < 100:
                 role = potential_role
                 break
     
-    # Fallback: try to extract from subject if it looks like a job title
-    if not role and clean_subject:
-        # Look for job title patterns in subject
-        job_title_patterns = [
-            r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist))",
-            r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist))\s+at",
-            r"at\s+([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist))"
+    # Method 4: Extract role from email body
+    if not role:
+        body_role_patterns = [
+            r"Position:\s*([^\n\r,]+)",
+            r"Role:\s*([^\n\r,]+)",
+            r"Job Title:\s*([^\n\r,]+)",
+            r"for the\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|!)",
+            r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))"
         ]
         
-        for pattern in job_title_patterns:
-            match = re.search(pattern, clean_subject, re.I)
+        for pattern in body_role_patterns:
+            match = re.search(pattern, body, re.I)
             if match:
                 potential_role = match.group(1).strip()
                 if len(potential_role) > 3 and len(potential_role) < 100:
@@ -211,7 +222,7 @@ def parse_company_and_role(subject, body, sender=""):
     if company:
         company = re.sub(r"\s+", " ", company).strip()
         # Remove common suffixes
-        company = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company)$", "", company, flags=re.I)
+        company = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company|& co\.?)$", "", company, flags=re.I)
     
     if role:
         role = re.sub(r"\s+", " ", role).strip()
@@ -423,24 +434,36 @@ def fetch_recent_emails():
         sender = msg.get("From", "").lower()
         subject_lower = subject.lower()
         
-        # Skip LinkedIn emails and other non-job emails
-        if any(skip_word in sender or skip_word in subject_lower for skip_word in [
-            "linkedin", "noreply", "no-reply", "notifications", "marketing", 
-            "newsletter", "promotional", "unsubscribe", "social media", "hubspot",
-            "mailchimp", "constant contact", "salesforce", "zendesk"
-        ]):
-            continue
+        # ONLY process emails that are clearly job application confirmations
+        # Based on the blue emails you showed me, these are the key patterns:
+        application_confirmations = [
+            r"we.*received.*your.*application",
+            r"thank.*you.*for.*your.*application", 
+            r"application.*received",
+            r"we.*received.*your.*job.*application",
+            r"thank.*you.*for.*your.*online.*submission",
+            r"we.*received.*your.*submission",
+            r"application.*submitted",
+            r"your.*application.*has.*been.*received"
+        ]
         
-        # Skip emails that are clearly not job applications
-        if any(skip_phrase in subject_lower for skip_phrase in [
-            "this is your sign", "great news", "congratulations", "deadline", "reminder",
-            "don't miss", "last chance", "expires", "closing soon", "apply now",
-            "open positions", "we're hiring", "join our team"
-        ]):
+        # Check if this is an application confirmation email
+        is_application_email = False
+        for pattern in application_confirmations:
+            if re.search(pattern, subject_lower) or re.search(pattern, body.lower()):
+                is_application_email = True
+                break
+        
+        # Skip if it's not an application confirmation
+        if not is_application_email:
             continue
             
-        # Only consider likely application emails:
-        if not re.search(r"apply|application|interview|assessment|offer|declin|reject|next steps|thanks|position|role|job|candidate|confirmation|submitted", subject, re.I):
+        # Additional filtering - skip if it contains non-job keywords
+        if any(skip_word in sender.lower() or skip_word in subject_lower for skip_word in [
+            "linkedin", "property", "rent", "payment", "maintenance", "verification", 
+            "security", "deadline", "reminder", "notification", "social", "reacted",
+            "externship", "admissions", "course", "class", "petscreening"
+        ]):
             continue
 
         body = get_text_from_message(msg)
