@@ -1,7 +1,7 @@
 name: notion-email-bot
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "0 9 * * *"   # every day at 9 AM UTC
   workflow_dispatch:
 
 jobs:
@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install notion-client python-dotenv
-      - run: python bot.py
+      - run: python bot.py --mode daily
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
@@ -21,4 +21,4 @@ jobs:
           IMAP_USER: ${{ secrets.IMAP_USER }}
           IMAP_PASS: ${{ secrets.IMAP_PASS }}
           IMAP_FOLDER: INBOX
-          IMAP_SINCE_DAYS: "30"
+          IMAP_SINCE_DAYS: "1"

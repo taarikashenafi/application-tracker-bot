@@ -1,6 +1,6 @@
 # bot.py
 # pip install: notion-client python-dotenv
-import os, imaplib, email, re, datetime
+import os, imaplib, email, re, datetime, argparse
 from email.header import decode_header, make_header
 from notion_client import Client
 
@@ -159,6 +159,101 @@ def parse_company_and_role(subject, body, sender=""):
                     company = re.sub(r"noreply|no-reply|careers|jobs|hr|talent", "", company, flags=re.I).strip()
                     if company:
                         company = company.title()
+                        
+                        # Special handling for known company domains
+                        company_mappings = {
+                            "hewlett": "Hewlett-Packard Enterprise",
+                            "hpe": "Hewlett-Packard Enterprise", 
+                            "hp": "Hewlett-Packard Enterprise",
+                            "jpmorgan": "JPMorgan Chase & Co.",
+                            "chase": "JPMorgan Chase & Co.",
+                            "salesforce": "Salesforce",
+                            "google": "Google",
+                            "microsoft": "Microsoft",
+                            "amazon": "Amazon",
+                            "meta": "Meta",
+                            "facebook": "Meta",
+                            "apple": "Apple",
+                            "netflix": "Netflix",
+                            "uber": "Uber",
+                            "airbnb": "Airbnb",
+                            "spotify": "Spotify",
+                            "twitter": "Twitter",
+                            "x": "X (formerly Twitter)",
+                            "linkedin": "LinkedIn",
+                            "adobe": "Adobe",
+                            "oracle": "Oracle",
+                            "ibm": "IBM",
+                            "intel": "Intel",
+                            "nvidia": "NVIDIA",
+                            "tesla": "Tesla",
+                            "spacex": "SpaceX",
+                            "openai": "OpenAI",
+                            "anthropic": "Anthropic",
+                            "stripe": "Stripe",
+                            "square": "Square",
+                            "paypal": "PayPal",
+                            "visa": "Visa",
+                            "mastercard": "Mastercard",
+                            "goldman": "Goldman Sachs",
+                            "morgan": "Morgan Stanley",
+                            "wells": "Wells Fargo",
+                            "bankofamerica": "Bank of America",
+                            "citi": "Citigroup",
+                            "pepsi": "PepsiCo",
+                            "coca": "Coca-Cola",
+                            "nike": "Nike",
+                            "adidas": "Adidas",
+                            "starbucks": "Starbucks",
+                            "mcdonalds": "McDonald's",
+                            "walmart": "Walmart",
+                            "target": "Target",
+                            "costco": "Costco",
+                            "home": "Home Depot",
+                            "lowes": "Lowe's",
+                            "best": "Best Buy",
+                            "dell": "Dell",
+                            "cisco": "Cisco",
+                            "vmware": "VMware",
+                            "redhat": "Red Hat",
+                            "dropbox": "Dropbox",
+                            "box": "Box",
+                            "slack": "Slack",
+                            "zoom": "Zoom",
+                            "figma": "Figma",
+                            "canva": "Canva",
+                            "notion": "Notion",
+                            "atlassian": "Atlassian",
+                            "jira": "Atlassian",
+                            "confluence": "Atlassian",
+                            "trello": "Trello",
+                            "asana": "Asana",
+                            "monday": "Monday.com",
+                            "airtable": "Airtable",
+                            "zapier": "Zapier",
+                            "hubspot": "HubSpot",
+                            "salesforce": "Salesforce",
+                            "pipedrive": "Pipedrive",
+                            "zendesk": "Zendesk",
+                            "freshworks": "Freshworks",
+                            "servicenow": "ServiceNow",
+                            "workday": "Workday",
+                            "bamboohr": "BambooHR",
+                            "greenhouse": "Greenhouse",
+                            "lever": "Lever",
+                            "smartrecruiters": "SmartRecruiters",
+                            "taleo": "Oracle Taleo",
+                            "icims": "iCIMS",
+                            "jobvite": "Jobvite",
+                            "ats": "ATS System"
+                        }
+                        
+                        # Check if we have a mapping for this domain
+                        domain_lower = domain.lower()
+                        for key, full_name in company_mappings.items():
+                            if key in domain_lower:
+                                company = full_name
+                                break
     
     # Method 2: Extract from email body (look for company names in application confirmations)
     if not company:
@@ -288,6 +383,8 @@ def extract_application_date(msg, subject, body):
         r"application date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         r"submitted on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         r"submitted\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"received on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"received\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",  # General date pattern
     ]
     
@@ -339,6 +436,8 @@ def extract_application_date(msg, subject, body):
                 # Parse email date (format: "Thu, 5 Sep 2024 10:30:00 -0700")
                 from email.utils import parsedate_to_datetime
                 email_date = parsedate_to_datetime(email_date_str).date()
+                # For application confirmations, the email date is usually the same day or next day
+                # So we can use it as the application date
                 return email_date.isoformat()
         except:
             pass
@@ -351,18 +450,39 @@ def derive_status(subject, body):
             return status
     return "Not Applied Yet"  # default if nothing matches
 
-def find_existing(url=None, company=None, role=None):
+def find_existing(url=None, company=None, role=None, applied_on=None):
+    """Find existing entry by URL, or by company+date combination"""
     ors = []
+    
+    # First priority: exact URL match
     if url:
         ors.append({"property": "Application Link / Portal", "url": {"equals": url}})
-    if company and role:
+    
+    # Second priority: company + date combination (most reliable for preventing duplicates)
+    if company and applied_on:
+        ors.append({
+            "and": [
+                {"property": "Company Name", "title": {"equals": company}},
+                {"property": "Application Date", "date": {"equals": applied_on}}
+            ]
+        })
+    
+    # Third priority: company + role (only if role is meaningful)
+    if company and role and role not in ["(unknown role)", "unknown role", "role", "position"]:
         ors.append({
             "and": [
                 {"property": "Company Name", "title": {"equals": company}},
                 {"property": "Role / Position", "rich_text": {"equals": role}},
             ]
         })
-    if not ors: return None
+    
+    # Fourth priority: just company name (fallback, but less reliable)
+    if company and not ors:
+        ors.append({"property": "Company Name", "title": {"equals": company}})
+    
+    if not ors: 
+        return None
+        
     resp = notion.databases.query(database_id=NOTION_DATABASE_ID, filter={"or": ors} if len(ors) > 1 else ors[0])
     return resp["results"][0]["id"] if resp["results"] else None
 
@@ -381,7 +501,10 @@ def upsert(company, role, status, url=None, applied_on=None, location=None, note
     if location:    props["Location"] = {"rich_text": [{"text": {"content": location}}]}
     if notes:       props["Notes"] = {"rich_text": [{"text": {"content": notes[:1900]}}]}
 
-    page_id = find_existing(url=url, company=company, role=role)
+    page_id = find_existing(url=url, company=company, role=role, applied_on=applied_on)
+    print(f"DEBUG: Looking for existing entry with company='{company}', role='{role}', applied_on='{applied_on}', url='{url}'")
+    print(f"DEBUG: Found existing page_id: {page_id}")
+    
     try:
         if page_id:
             notion.pages.update(page_id=page_id, properties=props)
@@ -409,10 +532,22 @@ def upsert(company, role, status, url=None, applied_on=None, location=None, note
                 return "failed"
         return "failed"
 
-def fetch_recent_emails():
-    print("DEBUG: IMAP_USER present?", bool(os.environ.get("IMAP_USER")))
-    print("DEBUG: IMAP_PASS length:", len(os.environ.get("IMAP_PASS", "")))
-    since_date = (datetime.date.today() - datetime.timedelta(days=IMAP_SINCE_DAYS)).strftime("%d-%b-%Y")
+def fetch_recent_emails(days_back=None):
+    """
+    Fetch and process recent emails for job applications
+    
+    Args:
+        days_back (int): Number of days to look back. If None, uses IMAP_SINCE_DAYS from environment
+    """
+    if days_back is None:
+        days_back = IMAP_SINCE_DAYS
+    
+    print(f"DEBUG: IMAP_USER present?", bool(os.environ.get("IMAP_USER")))
+    print(f"DEBUG: IMAP_PASS length:", len(os.environ.get("IMAP_PASS", "")))
+    print(f"DEBUG: Looking back {days_back} days for emails")
+    
+    since_date = (datetime.date.today() - datetime.timedelta(days=days_back)).strftime("%d-%b-%Y")
+    print(f"DEBUG: Searching for emails since {since_date}")
     M = imaplib.IMAP4_SSL(IMAP_HOST)
     try:
         M.login(IMAP_USER, IMAP_PASS)
@@ -485,7 +620,21 @@ def fetch_recent_emails():
         # Extract actual application date
         applied_on = extract_application_date(msg, subject, body)
         if not applied_on and status in ("Applied", "Not Applied Yet"):
-            applied_on = datetime.date.today().isoformat()
+            # For application confirmations, use email date as it's likely close to application date
+            try:
+                email_date_str = msg.get("Date", "")
+                if email_date_str:
+                    from email.utils import parsedate_to_datetime
+                    email_date = parsedate_to_datetime(email_date_str).date()
+                    # Don't use future dates
+                    if email_date <= datetime.date.today():
+                        applied_on = email_date.isoformat()
+                    else:
+                        applied_on = datetime.date.today().isoformat()
+                else:
+                    applied_on = datetime.date.today().isoformat()
+            except:
+                applied_on = datetime.date.today().isoformat()
             
         result = upsert(company, role, status, url=url, applied_on=applied_on, notes=subject)
         print(f"{result}: {company=} {role=} {status=} {url=} {applied_on=}")
@@ -494,6 +643,45 @@ def fetch_recent_emails():
         print("---")
     M.logout()
 
+def main():
+    """Main function with command line argument parsing"""
+    parser = argparse.ArgumentParser(description="Notion Email Bot for tracking job applications")
+    parser.add_argument(
+        "--mode", 
+        choices=["populate", "daily"], 
+        default="daily",
+        help="Mode to run the bot in: 'populate' for initial database setup (30 days), 'daily' for regular runs (1 day)"
+    )
+    parser.add_argument(
+        "--days", 
+        type=int, 
+        help="Override number of days to look back (useful for custom ranges)"
+    )
+    parser.add_argument(
+        "--debug-schema", 
+        action="store_true", 
+        help="Print database schema and exit"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.debug_schema:
+        debug_database_schema()
+        return
+    
+    # Determine how many days to look back
+    if args.days:
+        days_back = args.days
+        print(f"Custom mode: Looking back {days_back} days")
+    elif args.mode == "populate":
+        days_back = 30  # Look back 30 days for initial population
+        print("Populate mode: Looking back 30 days to populate database")
+    else:  # daily mode
+        days_back = 1   # Look back 1 day for daily runs
+        print("Daily mode: Looking back 1 day for new applications")
+    
+    # Run the email processing
+    fetch_recent_emails(days_back=days_back)
+
 if __name__ == "__main__":
-    debug_database_schema()
-    fetch_recent_emails()
+    main()
