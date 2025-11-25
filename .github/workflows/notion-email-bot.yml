@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install notion-client python-dotenv
+      - run: pip install notion-client==2.5.0 python-dotenv
       - run: python bot.py --mode daily
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}

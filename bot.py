@@ -14,6 +14,14 @@ IMAP_SINCE_DAYS      = int(os.environ.get("IMAP_SINCE_DAYS", "30"))  # look back
 
 notion = Client(auth=NOTION_TOKEN)
 
+# Debug: Check notion-client version and available methods
+try:
+    import notion_client
+    print(f"DEBUG: notion-client version: {notion_client.__version__}")
+    print(f"DEBUG: Available databases methods: {[m for m in dir(notion.databases) if not m.startswith('_')]}")
+except Exception as e:
+    print(f"DEBUG: Could not check notion-client version: {e}")
+
 def debug_database_schema():
     """Debug function to print the database schema and status options"""
     try:
@@ -35,18 +43,32 @@ def get_valid_status_options():
     """Get the valid status options from the database"""
     try:
         db_info = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        if not db_info or "properties" not in db_info:
+            print(f"Warning: Database info missing 'properties' key. Keys: {list(db_info.keys()) if db_info else 'None'}")
+            return []
+        
         status_prop = None
-        for prop_name, prop_config in db_info["properties"].items():
-            if prop_name == "Application Status" and prop_config['type'] == 'status':
+        for prop_name, prop_config in db_info.get("properties", {}).items():
+            if prop_name == "Application Status" and prop_config.get('type') == 'status':
                 status_prop = prop_config
                 break
         
         if status_prop:
-            options = status_prop.get('status', {}).get('options', [])
-            return [opt['name'] for opt in options]
+            # Handle different possible structures
+            if 'status' in status_prop:
+                options = status_prop.get('status', {}).get('options', [])
+            elif 'options' in status_prop:
+                options = status_prop.get('options', [])
+            else:
+                print(f"Warning: Status property structure unexpected: {list(status_prop.keys())}")
+                return []
+            
+            return [opt.get('name') for opt in options if isinstance(opt, dict) and 'name' in opt]
         return []
     except Exception as e:
         print(f"Error getting status options: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return []
 
 def validate_status(status):
@@ -482,9 +504,39 @@ def find_existing(url=None, company=None, role=None, applied_on=None):
     
     if not ors: 
         return None
+    
+    try:
+        # Build the filter - use "or" if multiple conditions, otherwise use the single condition
+        if len(ors) > 1:
+            filter_obj = {"or": ors}
+        else:
+            filter_obj = ors[0]
         
-    resp = notion.databases.query(database_id=NOTION_DATABASE_ID, filter={"or": ors} if len(ors) > 1 else ors[0])
-    return resp["results"][0]["id"] if resp["results"] else None
+        # Check if query method exists (for compatibility with different versions)
+        if not hasattr(notion.databases, 'query'):
+            print("Warning: databases.query() method not available in this version of notion-client")
+            print("Attempting to use alternative approach...")
+            # Fallback: return None to skip duplicate checking
+            # This means duplicates might be created, but the bot will still work
+            return None
+        
+        # Query the database
+        resp = notion.databases.query(database_id=NOTION_DATABASE_ID, filter=filter_obj)
+        
+        if resp and "results" in resp and resp["results"]:
+            return resp["results"][0]["id"]
+        return None
+    except AttributeError as e:
+        # Fallback: try alternative API if query doesn't exist
+        print(f"Warning: databases.query() not available: {e}")
+        print("Skipping duplicate check - entries may be created even if duplicates exist")
+        return None
+    except Exception as e:
+        print(f"Error querying database for existing entry: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        # Don't fail completely - just skip duplicate checking
+        return None
 
 def upsert(company, role, status, url=None, applied_on=None, location=None, notes=None):
     # Validate and potentially correct the status

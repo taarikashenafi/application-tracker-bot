@@ -10,7 +10,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install notion-client python-dotenv
+      - run: pip install notion-client==2.5.0 python-dotenv
       - name: Catch up on missed entries (90 days)
         run: python bot.py --days 90
         env:
