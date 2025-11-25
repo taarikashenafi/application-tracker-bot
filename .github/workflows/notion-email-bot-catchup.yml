@@ -1,0 +1,23 @@
+name: notion-email-bot-catchup
+on:
+  workflow_dispatch:  # Manual trigger only - for catching up on missed entries
+
+jobs:
+  catchup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install notion-client python-dotenv
+      - name: Catch up on missed entries (90 days)
+        run: python bot.py --days 90
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          IMAP_HOST: imap.gmail.com
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASS: ${{ secrets.IMAP_PASS }}
+          IMAP_FOLDER: INBOX
+

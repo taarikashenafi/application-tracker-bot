@@ -560,6 +560,20 @@ def fetch_recent_emails(days_back=None):
     search_query = f'(SINCE {since_date})'
     typ, data = M.search(None, search_query)
     ids = data[0].split() if data and data[0] else []
+    
+    print(f"INFO: Found {len(ids)} total emails in the last {days_back} days")
+    
+    # Statistics tracking
+    stats = {
+        "total_emails": len(ids),
+        "processed": 0,
+        "skipped_not_confirmation": 0,
+        "skipped_non_job_keywords": 0,
+        "skipped_no_company": 0,
+        "successful_upserts": 0,
+        "failed_upserts": 0
+    }
+    
     for eid in ids:
         typ, msg_data = M.fetch(eid, "(RFC822)")
         if typ != "OK": continue
@@ -593,6 +607,7 @@ def fetch_recent_emails(days_back=None):
         
         # Skip if it's not an application confirmation
         if not is_application_email:
+            stats["skipped_not_confirmation"] += 1
             continue
             
         # Additional filtering - skip if it contains non-job keywords
@@ -601,6 +616,7 @@ def fetch_recent_emails(days_back=None):
             "security", "deadline", "reminder", "notification", "social", "reacted",
             "externship", "admissions", "course", "class", "petscreening"
         ]):
+            stats["skipped_non_job_keywords"] += 1
             continue
 
         status = derive_status(subject, body)
@@ -608,11 +624,14 @@ def fetch_recent_emails(days_back=None):
 
         # Skip if we couldn't extract a meaningful company name
         if not company or company.lower() in ["unknown", "unknown company", "our", "your", "this", "that", "the"]:
+            stats["skipped_no_company"] += 1
             print(f"SKIPPED: No meaningful company name extracted")
             print(f"  Subject: {subject[:100]}...")
             print(f"  Sender: {sender}")
             print("---")
             continue
+        
+        stats["processed"] += 1
 
         # Extract application URL - prioritize job-related URLs
         url = extract_application_url(body, subject)
@@ -637,10 +656,28 @@ def fetch_recent_emails(days_back=None):
                 applied_on = datetime.date.today().isoformat()
             
         result = upsert(company, role, status, url=url, applied_on=applied_on, notes=subject)
+        if "failed" in result:
+            stats["failed_upserts"] += 1
+        else:
+            stats["successful_upserts"] += 1
         print(f"{result}: {company=} {role=} {status=} {url=} {applied_on=}")
         print(f"  Subject: {subject[:100]}...")
         print(f"  Sender: {sender}")
         print("---")
+    
+    # Print statistics summary
+    print("\n" + "="*70)
+    print("PROCESSING SUMMARY")
+    print("="*70)
+    print(f"Total emails found: {stats['total_emails']}")
+    print(f"✅ Processed: {stats['processed']}")
+    print(f"✅ Successfully upserted: {stats['successful_upserts']}")
+    print(f"❌ Failed upserts: {stats['failed_upserts']}")
+    print(f"⏭️  Skipped (not application confirmation): {stats['skipped_not_confirmation']}")
+    print(f"⏭️  Skipped (non-job keywords): {stats['skipped_non_job_keywords']}")
+    print(f"⏭️  Skipped (no company extracted): {stats['skipped_no_company']}")
+    print("="*70 + "\n")
+    
     M.logout()
 
 def main():
@@ -677,8 +714,8 @@ def main():
         days_back = 30  # Look back 30 days for initial population
         print("Populate mode: Looking back 30 days to populate database")
     else:  # daily mode
-        days_back = 1   # Look back 1 day for daily runs
-        print("Daily mode: Looking back 1 day for new applications")
+        days_back = 7   # Look back 7 days for daily runs (catches delayed emails)
+        print("Daily mode: Looking back 7 days for new applications")
     
     # Run the email processing
     fetch_recent_emails(days_back=days_back)
