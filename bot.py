@@ -162,7 +162,9 @@ NON_APPLICATION_MARKERS = re.compile(
     r"upcoming event|save the date|register now|join us for|office hours|"
     r"explore opportunities|update your profile|check out our|learn more about our program|"
     r"unsubscribe from these emails|browse jobs|new jobs? matching|job alert|"
-    r"recommended jobs?|jobs? you may be interested",
+    r"recommended jobs?|jobs? you may be interested|event confirmation|"
+    r"you.{0,10}re registered|registration confirmed|rsvp confirmed|resume workshop|"
+    r"career workshop|meetup-join|teams\.microsoft\.com",
     re.I,
 )
 
