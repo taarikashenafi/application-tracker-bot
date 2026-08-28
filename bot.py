@@ -198,6 +198,19 @@ ROLE_KEYWORDS = (
     "qa", "quality assurance", "software", "data", "engineering",
 )
 
+# Words that, if found anywhere inside an extracted company candidate, indicate we
+# actually captured a sentence fragment (e.g. "team is looking for a member of our")
+# rather than a real company/proper-noun name.
+SENTENCE_FRAGMENT_WORDS = {
+    "is", "are", "was", "were", "will", "would", "be", "been", "being",
+    "looking", "look", "seeking", "seek", "member", "members", "team",
+    "for", "our", "your", "us", "join", "joining", "apply", "applying",
+    "we", "you", "they", "who", "that", "which", "to", "of", "in", "on",
+    "at", "as", "role", "position", "opening", "opportunity", "have",
+    "has", "had", "can", "may", "excited", "thrilled", "pleased",
+}
+
+
 def _clean_company_candidate(name):
     """Validate/normalize a candidate company name; return None if it isn't usable."""
     if not name:
@@ -210,6 +223,13 @@ def _clean_company_candidate(name):
     # Reject anything that still looks like a raw email header/address fragment
     if re.search(r"<.*>", name) or re.search(r"\d{4,}", name):
         return None
+    # Reject sentence fragments: real company names don't contain verbs/stopwords
+    # like "is looking for a member of", nor do they run more than a few words long.
+    words = name.split()
+    if len(words) > 5:
+        return None
+    if any(w.lower() in SENTENCE_FRAGMENT_WORDS for w in words):
+        return None
     name = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company|& co\.?)$", "", name, flags=re.I)
     return name.strip() or None
 
@@ -220,6 +240,8 @@ def _clean_role_candidate(role):
         return None
     role = re.sub(r"\s+", " ", role).strip(" \t\"'.,-")
     role = re.sub(r"^(the|a|an)\s+", "", role, flags=re.I)
+    # Strip a leading requisition/job-code number, e.g. "300883 - Software Engineer I"
+    role = re.sub(r"^\d{3,}\s*[-–—:]\s*", "", role)
     role = re.sub(r"\s+(position|role|job|opening|opportunity)$", "", role, flags=re.I)
     if not role or len(role) < 3 or len(role) > 80:
         return None
