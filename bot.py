@@ -132,270 +132,327 @@ def get_text_from_message(msg):
     return ""
 
 # --- subject lines to status mapping ---
+# NOTE: gaps between key words are bounded (".{0,N}") rather than unbounded (".*").
+# HTML-only emails get flattened to one long single-line string by get_text_from_message,
+# so an unbounded ".*" can span completely unrelated sentences anywhere in the email and
+# produce false-positive matches. Bounding the gap keeps matches scoped to one phrase.
 SUBJECT_RULES = [
     # Rejection patterns (check first to avoid false positives)
     (re.compile(r"not move forward|reject|regret|declined|unsuccessful|not selected|not chosen|not proceed", re.I), "Rejected"),
     
     # Offer patterns
-    (re.compile(r"offer|congratulations.*offer|we.*pleased.*offer", re.I), "Offer Received"),
+    (re.compile(r"offer|congratulations.{0,30}offer|we.{0,20}pleased.{0,20}offer", re.I), "Offer Received"),
     
     # Interview patterns
-    (re.compile(r"interview.*scheduled|phone screen|assessment.*scheduled|coding challenge.*scheduled|interview.*invite", re.I), "Interview Scheduled"),
+    (re.compile(r"interview.{0,20}scheduled|phone screen|assessment.{0,20}scheduled|coding challenge.{0,20}scheduled|interview.{0,20}invite", re.I), "Interview Scheduled"),
     (re.compile(r"interview|phone screen|assessment|coding challenge|technical interview|behavioral interview", re.I), "Interview Scheduled"),
     
     # Application confirmation patterns (most common for job application emails)
-    (re.compile(r"we.*received.*your.*application|thank.*you.*for.*your.*application|application.*received|we.*received.*your.*job.*application|thank.*you.*for.*your.*online.*submission|we.*received.*your.*submission|application.*submitted|your.*application.*has.*been.*received", re.I), "Applied"),
+    (re.compile(r"we.{0,20}received.{0,20}your.{0,20}application|thank.{0,10}you.{0,10}for.{0,10}your.{0,10}application|application.{0,10}received|we.{0,20}received.{0,20}your.{0,20}job.{0,10}application|thank.{0,10}you.{0,10}for.{0,10}your.{0,10}online.{0,10}submission|we.{0,20}received.{0,20}your.{0,20}submission|application.{0,10}submitted|your.{0,10}application.{0,10}has.{0,10}been.{0,10}received", re.I), "Applied"),
     
     # In progress patterns
-    (re.compile(r"next steps|moving forward|under review|in review|being considered|application.*review", re.I), "In Progress"),
+    (re.compile(r"next steps|moving forward|under review|in review|being considered|application.{0,20}review", re.I), "In Progress"),
 ]
 
+# Emails that mention "application" incidentally but are not actual application-confirmation
+# emails (newsletters, info sessions, marketing) - if any of these appear, skip regardless of
+# an otherwise-matching confirmation pattern.
+NON_APPLICATION_MARKERS = re.compile(
+    r"info session|information session|webinar|newsletter|hiring event|career fair|"
+    r"upcoming event|save the date|register now|join us for|office hours|"
+    r"explore opportunities|update your profile|check out our|learn more about our program|"
+    r"unsubscribe from these emails|browse jobs|new jobs? matching|job alert|"
+    r"recommended jobs?|jobs? you may be interested|event confirmation|"
+    r"you.{0,10}re registered|registration confirmed|rsvp confirmed|resume workshop|"
+    r"career workshop|meetup-join|teams\.microsoft\.com",
+    re.I,
+)
+
+# ATS / mailer domains that are never the actual employer - company name must come from the
+# email body or sender display name instead of the sending domain in these cases.
+ATS_OR_MAILER_DOMAINS = {
+    "gmail", "yahoo", "hotmail", "outlook", "linkedin", "indeed", "glassdoor",
+    "hubspot", "mailchimp", "myworkday", "workday", "ashbyhq", "ashby",
+    "greenhouse", "lever", "icims", "smartrecruiters", "jobvite", "taleo",
+    "bamboohr", "breezy", "jazzhr", "recruiterbox", "applytojob", "workable",
+    "successfactors", "sendgrid", "mailgun", "amazonses", "sparkpostmail",
+    "sparkpost", "notifications", "mail",
+}
+
+# Generic sender-display-name / extracted-company terms that are never a real company name.
+GENERIC_NAME_TERMS = {
+    "recruiting", "recruitment", "talent acquisition", "talent", "hr",
+    "human resources", "careers", "career", "hiring team", "hiring",
+    "no reply", "noreply", "do not reply", "team", "notifications",
+    "the", "a", "an", "and", "or", "but", "our", "your", "this", "that",
+    "warm", "hello", "recruiter",
+}
+
+# Words that indicate a plausible job title, used to validate extracted roles.
+ROLE_KEYWORDS = (
+    "engineer", "developer", "analyst", "manager", "intern", "associate",
+    "specialist", "coordinator", "assistant", "consultant", "designer",
+    "scientist", "program", "architect", "administrator", "representative",
+    "technician", "researcher", "fellow", "officer", "executive", "lead",
+    "product", "marketing", "sales", "finance", "operations", "support",
+    "qa", "quality assurance", "software", "data", "engineering",
+)
+
+# Words that, if found anywhere inside an extracted company candidate, indicate we
+# actually captured a sentence fragment (e.g. "team is looking for a member of our")
+# rather than a real company/proper-noun name.
+SENTENCE_FRAGMENT_WORDS = {
+    "is", "are", "was", "were", "will", "would", "be", "been", "being",
+    "looking", "look", "seeking", "seek", "member", "members", "team",
+    "for", "our", "your", "us", "join", "joining", "apply", "applying",
+    "we", "you", "they", "who", "that", "which", "to", "of", "in", "on",
+    "at", "as", "role", "position", "opening", "opportunity", "have",
+    "has", "had", "can", "may", "excited", "thrilled", "pleased",
+}
+
+
+def _clean_company_candidate(name):
+    """Validate/normalize a candidate company name; return None if it isn't usable."""
+    if not name:
+        return None
+    name = re.sub(r"\s+", " ", name).strip(" \t\"'.,-")
+    if not name or "@" in name or len(name) < 2 or len(name) > 60:
+        return None
+    if name.lower() in GENERIC_NAME_TERMS:
+        return None
+    # Reject anything that still looks like a raw email header/address fragment
+    if re.search(r"<.*>", name) or re.search(r"\d{4,}", name):
+        return None
+    # Reject sentence fragments: real company names don't contain verbs/stopwords
+    # like "is looking for a member of", nor do they run more than a few words long.
+    words = name.split()
+    if len(words) > 5:
+        return None
+    if any(w.lower() in SENTENCE_FRAGMENT_WORDS for w in words):
+        return None
+    name = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company|& co\.?)$", "", name, flags=re.I)
+    return name.strip() or None
+
+
+def _clean_role_candidate(role):
+    """Validate/normalize a candidate role/title; return None if it doesn't look like a title."""
+    if not role:
+        return None
+    role = re.sub(r"\s+", " ", role).strip(" \t\"'.,-")
+    role = re.sub(r"^(the|a|an)\s+", "", role, flags=re.I)
+    # Strip a leading requisition/job-code number, e.g. "300883 - Software Engineer I"
+    role = re.sub(r"^\d{3,}\s*[-–—:]\s*", "", role)
+    role = re.sub(r"\s+(position|role|job|opening|opportunity)$", "", role, flags=re.I)
+    if not role or len(role) < 3 or len(role) > 80:
+        return None
+    if "@" in role or "http" in role.lower():
+        return None
+    if not any(kw in role.lower() for kw in ROLE_KEYWORDS):
+        return None
+    return role
+
+
 def parse_company_and_role(subject, body, sender=""):
-    """Extract company and role from job application confirmation emails"""
+    """Extract company and role from job application confirmation emails.
+
+    Company is resolved in priority order: explicit body phrasing (most reliable,
+    since it names the employer directly) > sender display name > sending domain
+    (skipped entirely for known ATS/mailer domains, since those never reflect the
+    actual employer). Every candidate is validated before use so we never fall
+    back to noise like a raw email address or a recruiter-team label.
+    """
     company = None
     role = None
-    
-    # Clean up subject
+
     clean_subject = re.sub(r"^(re:|fwd?:|fw:)\s*", "", subject, flags=re.I).strip()
     clean_subject = re.sub(r"\s*\[.*?\]\s*$", "", clean_subject).strip()
-    
-    # Method 1: Extract from sender email domain (most reliable for job apps)
-    if sender:
-        # Handle common job application email patterns
-        sender_lower = sender.lower()
-        
-        # Direct company emails (e.g., "JPMorgan Chase & Co.")
-        if "& co" in sender_lower or "corp" in sender_lower or "inc" in sender_lower:
-            company = sender.title()
-            # Clean up common suffixes
-            company = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company|& co\.?)$", "", company, flags=re.I)
-        else:
-            # Extract from domain
-            domain_match = re.search(r"@([^.]+)\.", sender_lower)
-            if domain_match:
-                domain = domain_match.group(1)
-                # Skip generic domains
-                if domain not in ["gmail", "yahoo", "hotmail", "outlook", "linkedin", "indeed", "glassdoor", "hubspot", "mailchimp", "myworkday", "workday"]:
-                    company = domain.title()
-                    # Handle common company name variations
-                    company = re.sub(r"noreply|no-reply|careers|jobs|hr|talent", "", company, flags=re.I).strip()
-                    if company:
-                        company = company.title()
-                        
-                        # Special handling for known company domains
-                        company_mappings = {
-                            "hewlett": "Hewlett-Packard Enterprise",
-                            "hpe": "Hewlett-Packard Enterprise", 
-                            "hp": "Hewlett-Packard Enterprise",
-                            "jpmorgan": "JPMorgan Chase & Co.",
-                            "chase": "JPMorgan Chase & Co.",
-                            "salesforce": "Salesforce",
-                            "google": "Google",
-                            "microsoft": "Microsoft",
-                            "amazon": "Amazon",
-                            "meta": "Meta",
-                            "facebook": "Meta",
-                            "apple": "Apple",
-                            "netflix": "Netflix",
-                            "uber": "Uber",
-                            "airbnb": "Airbnb",
-                            "spotify": "Spotify",
-                            "twitter": "Twitter",
-                            "x": "X (formerly Twitter)",
-                            "linkedin": "LinkedIn",
-                            "adobe": "Adobe",
-                            "oracle": "Oracle",
-                            "ibm": "IBM",
-                            "intel": "Intel",
-                            "nvidia": "NVIDIA",
-                            "tesla": "Tesla",
-                            "spacex": "SpaceX",
-                            "openai": "OpenAI",
-                            "anthropic": "Anthropic",
-                            "stripe": "Stripe",
-                            "square": "Square",
-                            "paypal": "PayPal",
-                            "visa": "Visa",
-                            "mastercard": "Mastercard",
-                            "goldman": "Goldman Sachs",
-                            "morgan": "Morgan Stanley",
-                            "wells": "Wells Fargo",
-                            "bankofamerica": "Bank of America",
-                            "citi": "Citigroup",
-                            "pepsi": "PepsiCo",
-                            "coca": "Coca-Cola",
-                            "nike": "Nike",
-                            "adidas": "Adidas",
-                            "starbucks": "Starbucks",
-                            "mcdonalds": "McDonald's",
-                            "walmart": "Walmart",
-                            "target": "Target",
-                            "costco": "Costco",
-                            "home": "Home Depot",
-                            "lowes": "Lowe's",
-                            "best": "Best Buy",
-                            "dell": "Dell",
-                            "cisco": "Cisco",
-                            "vmware": "VMware",
-                            "redhat": "Red Hat",
-                            "dropbox": "Dropbox",
-                            "box": "Box",
-                            "slack": "Slack",
-                            "zoom": "Zoom",
-                            "figma": "Figma",
-                            "canva": "Canva",
-                            "notion": "Notion",
-                            "atlassian": "Atlassian",
-                            "jira": "Atlassian",
-                            "confluence": "Atlassian",
-                            "trello": "Trello",
-                            "asana": "Asana",
-                            "monday": "Monday.com",
-                            "airtable": "Airtable",
-                            "zapier": "Zapier",
-                            "hubspot": "HubSpot",
-                            "salesforce": "Salesforce",
-                            "pipedrive": "Pipedrive",
-                            "zendesk": "Zendesk",
-                            "freshworks": "Freshworks",
-                            "servicenow": "ServiceNow",
-                            "workday": "Workday",
-                            "bamboohr": "BambooHR",
-                            "greenhouse": "Greenhouse",
-                            "lever": "Lever",
-                            "smartrecruiters": "SmartRecruiters",
-                            "taleo": "Oracle Taleo",
-                            "icims": "iCIMS",
-                            "jobvite": "Jobvite",
-                            "ats": "ATS System"
-                        }
-                        
-                        # Check if we have a mapping for this domain
-                        domain_lower = domain.lower()
-                        for key, full_name in company_mappings.items():
-                            if key in domain_lower:
-                                company = full_name
-                                break
-    
-    # Method 2: Extract from email body (look for company names in application confirmations)
-    if not company:
-        company_patterns = [
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+team",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+talent",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+recruiting",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+hr",
-            r"at\s+([A-Z][a-zA-Z\s&\.]+?)(?:\s|$|,|\.|!)",
-            r"from\s+([A-Z][a-zA-Z\s&\.]+?)(?:\s|$|,|\.|!)",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+and\s+co",
-            r"([A-Z][a-zA-Z\s&\.]+?)\s+corporation"
-        ]
-        
-        for pattern in company_patterns:
-            match = re.search(pattern, body, re.I)
-            if match:
-                potential_company = match.group(1).strip()
-                # Filter out common false positives
-                if (len(potential_company) > 2 and 
-                    potential_company.lower() not in ["the", "a", "an", "and", "or", "but", "our", "your", "this", "that", "warm", "hello"] and
-                    not re.search(r"^(great|good|wonderful|amazing|thank)", potential_company, re.I)):
-                    company = potential_company
-                    break
-    
-    # Method 3: Extract role from subject line (common in job application emails)
-    role_patterns = [
-        r"for the\s+([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))",
-        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))\s+position",
-        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))\s+intern",
-        r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))\s+role"
+
+    company_mappings = {
+        "hewlett": "Hewlett-Packard Enterprise", "hpe": "Hewlett-Packard Enterprise",
+        "hp": "Hewlett-Packard Enterprise", "jpmorgan": "JPMorgan Chase & Co.",
+        "chase": "JPMorgan Chase & Co.", "salesforce": "Salesforce", "google": "Google",
+        "microsoft": "Microsoft", "amazon": "Amazon", "meta": "Meta", "facebook": "Meta",
+        "apple": "Apple", "netflix": "Netflix", "uber": "Uber", "airbnb": "Airbnb",
+        "spotify": "Spotify", "twitter": "Twitter", "linkedin": "LinkedIn", "adobe": "Adobe",
+        "oracle": "Oracle", "ibm": "IBM", "intel": "Intel", "nvidia": "NVIDIA",
+        "tesla": "Tesla", "spacex": "SpaceX", "openai": "OpenAI", "anthropic": "Anthropic",
+        "stripe": "Stripe", "square": "Square", "paypal": "PayPal", "visa": "Visa",
+        "mastercard": "Mastercard", "goldman": "Goldman Sachs", "morgan": "Morgan Stanley",
+        "wells": "Wells Fargo", "bankofamerica": "Bank of America", "citi": "Citigroup",
+        "pepsi": "PepsiCo", "coca": "Coca-Cola", "nike": "Nike", "adidas": "Adidas",
+        "starbucks": "Starbucks", "mcdonalds": "McDonald's", "walmart": "Walmart",
+        "target": "Target", "costco": "Costco", "lowes": "Lowe's", "dell": "Dell",
+        "cisco": "Cisco", "vmware": "VMware", "redhat": "Red Hat", "dropbox": "Dropbox",
+        "box": "Box", "slack": "Slack", "zoom": "Zoom", "figma": "Figma", "canva": "Canva",
+        "notion": "Notion", "atlassian": "Atlassian", "trello": "Trello", "asana": "Asana",
+        "monday": "Monday.com", "airtable": "Airtable", "zapier": "Zapier",
+        "hubspot": "HubSpot", "pipedrive": "Pipedrive", "zendesk": "Zendesk",
+        "freshworks": "Freshworks", "servicenow": "ServiceNow", "rivian": "Rivian",
+        "citadel": "Citadel", "twitch": "Twitch", "disney": "Disney", "pinterest": "Pinterest",
+        "coinbase": "Coinbase", "robinhood": "Robinhood", "waymo": "Waymo",
+    }
+
+    def apply_mapping(text):
+        text_lower = text.lower()
+        for key, full_name in company_mappings.items():
+            if key in text_lower:
+                return full_name
+        return None
+
+    # Priority 1: explicit "applying to/at <Company>" style phrasing in the body - this
+    # names the actual employer directly and is more reliable than the sending domain,
+    # which is frequently an ATS (Greenhouse, Ashby, Workday, etc.) rather than the employer.
+    body_company_patterns = [
+        r"appl(?:y|ying|ication)\s+(?:to|at|with)\s+([A-Z][\w&.\- ]{1,40}?)(?:\s*[.,!\n]|\s+for\s|\s+is\s|\s+has\s|$)",
+        r"interest in\s+([A-Z][\w&.\- ]{1,40}?)(?:\s*[.,!\n]|$)",
+        r"joining\s+([A-Z][\w&.\- ]{1,40}?)(?:\s*[.,!\n]|$)",
+        r"(?:the|our)\s+([A-Z][\w&.\- ]{1,40}?)\s+(?:recruiting|talent acquisition|hiring)\s+team",
     ]
-    
-    for pattern in role_patterns:
-        match = re.search(pattern, clean_subject, re.I)
+    for pattern in body_company_patterns:
+        match = re.search(pattern, body, re.I)
         if match:
-            potential_role = match.group(1).strip()
-            if len(potential_role) > 3 and len(potential_role) < 100:
-                role = potential_role
+            candidate = _clean_company_candidate(match.group(1))
+            if candidate:
+                mapped = apply_mapping(candidate)
+                company = mapped or candidate
                 break
-    
-    # Method 4: Extract role from email body
-    if not role:
-        body_role_patterns = [
-            r"Position:\s*([^\n\r,]+)",
-            r"Role:\s*([^\n\r,]+)",
-            r"Job Title:\s*([^\n\r,]+)",
-            r"for the\s+([A-Z][a-zA-Z\s]+?)(?:\s|$|,|\.|!)",
-            r"([A-Z][a-zA-Z\s]+?(?:Engineer|Developer|Analyst|Manager|Intern|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|Program))"
-        ]
-        
-        for pattern in body_role_patterns:
-            match = re.search(pattern, body, re.I)
+
+    # Priority 2: sender display name, e.g. '"Rivian Careers" <no-reply@rivian.com>'
+    if not company and sender:
+        display_match = re.match(r'\s*"?([^"<]+?)"?\s*<', sender)
+        if display_match:
+            display_name = display_match.group(1)
+            # Strip generic recruiting-team suffixes to isolate the company name
+            display_name = re.sub(
+                r"\b(recruiting|recruitment|talent acquisition|talent|careers?|hiring team|"
+                r"hiring|human resources|hr team|hr|no.?reply|do not reply|team|notifications)\b",
+                "", display_name, flags=re.I,
+            ).strip(" -|,")
+            candidate = _clean_company_candidate(display_name)
+            if candidate:
+                mapped = apply_mapping(candidate)
+                company = mapped or candidate
+
+    # Priority 3: sending domain, but only if it's not a known ATS/mailer domain (those
+    # send on behalf of many different employers, so the domain itself is not the company).
+    if not company and sender:
+        domain_match = re.search(r"@([^.]+)\.", sender.lower())
+        if domain_match:
+            domain = domain_match.group(1)
+            if domain not in ATS_OR_MAILER_DOMAINS:
+                mapped = apply_mapping(domain)
+                if mapped:
+                    company = mapped
+                else:
+                    candidate = _clean_company_candidate(domain.title())
+                    if candidate:
+                        company = candidate
+
+    # --- Role extraction ---
+    specific_role_patterns = [
+        r"for the\s+([A-Za-z0-9][\w/&,.\- ]{2,60}?)\s+(?:position|role|opening|opportunity|req|internship)",
+        r"application for\s+(?:the\s+)?([A-Za-z0-9][\w/&,.\- ]{2,60}?)(?:\s+(?:position|role|at|opening)|[.,!\n]|$)",
+        r"appl(?:y|ying|ication)\s+for\s+(?:the\s+)?([A-Za-z0-9][\w/&,.\- ]{2,60}?)(?:\s+(?:position|role|at|opening)|[.,!\n]|$)",
+        r"role of\s+([A-Za-z0-9][\w/&,.\- ]{2,60}?)(?:[.,!\n]|$)",
+        r"Position:\s*([^\n\r,]{2,80})",
+        r"Role:\s*([^\n\r,]{2,80})",
+        r"Job Title:\s*([^\n\r,]{2,80})",
+    ]
+    # Generic fallback: a capitalized phrase ending in a job-title keyword. Word count is
+    # capped (at most 4 words before the keyword) so this can't run away across an entire
+    # HTML-flattened sentence the way an unbounded match would.
+    generic_role_pattern = (
+        r"\b([A-Z][\w&.\-]*(?:\s+[A-Za-z0-9&.\-]+){0,4}?\s+(?:Engineer|Developer|Analyst|Manager|"
+        r"Intern(?:ship)?|Associate|Specialist|Coordinator|Assistant|Consultant|Designer|Scientist|"
+        r"Architect|Representative|Technician|Researcher))\b"
+    )
+
+    # Try the specific, trigger-phrase patterns first (across subject, then body) - these
+    # anchor to explicit phrasing like "application for the X position" and are far less
+    # likely to accidentally swallow leading, unrelated words than the generic fallback.
+    for source in (clean_subject, body):
+        for pattern in specific_role_patterns:
+            match = re.search(pattern, source, re.I)
             if match:
-                potential_role = match.group(1).strip()
-                if len(potential_role) > 3 and len(potential_role) < 100:
-                    role = potential_role
+                candidate = _clean_role_candidate(match.group(1))
+                if candidate:
+                    role = candidate
                     break
-    
-    # Clean up extracted values
-    if company:
-        company = re.sub(r"\s+", " ", company).strip()
-        # Remove common suffixes
-        company = re.sub(r"\s+(inc|llc|ltd|corp|corporation|company|& co\.?)$", "", company, flags=re.I)
-    
-    if role:
-        role = re.sub(r"\s+", " ", role).strip()
-        # Remove common prefixes/suffixes
-        role = re.sub(r"^(the|a|an)\s+", "", role, flags=re.I)
-        role = re.sub(r"\s+(position|role|job)$", "", role, flags=re.I)
-    
+        if role:
+            break
+
+    # Only fall back to the generic bare-keyword pattern if nothing more specific matched.
+    if not role:
+        for source in (clean_subject, body):
+            match = re.search(generic_role_pattern, source)
+            if match:
+                candidate = _clean_role_candidate(match.group(1))
+                if candidate:
+                    role = candidate
+                    break
+
     return company, role
 
+
 def extract_application_url(body, subject):
-    """Extract the most relevant application URL from email content"""
-    # Find all URLs in the content
-    urls = re.findall(r"https?://[^\s<>\"']+", body + " " + subject)
-    
+    """Extract the URL most likely to be the original job posting/application page."""
+    urls = re.findall(r"https?://[^\s<>\"')\]]+", body + " " + subject)
+
     if not urls:
         return None
-    
-    # Prioritize URLs that look like job application portals
+
+    # Strong signal: URL path shape used by job-detail pages on common ATS platforms
+    # (e.g. greenhouse.io/.../jobs/12345, boards.greenhouse.io/company/jobs/12345,
+    # myworkdayjobs.com/.../job/..., lever.co/company/<uuid>, ashbyhq.com/.../<slug>).
+    job_posting_path_re = re.compile(
+        r"/(jobs?|careers?|postings?|positions?|opening|req(?:uisition)?s?)/[\w\-./]+", re.I
+    )
+
+    # General job-related keywords anywhere in the URL (weaker signal on their own).
     job_indicators = [
         "careers", "jobs", "apply", "application", "hiring", "recruiting",
         "workday", "greenhouse", "lever", "bamboohr", "smartrecruiters",
-        "taleo", "icims", "jobvite", "ats", "portal"
+        "taleo", "icims", "jobvite", "ashbyhq", "workable", "portal", "posting",
     ]
-    
-    # Score URLs based on job-related keywords
+
+    # Links that are never the job posting itself - tracking pixels, unsubscribe,
+    # help/privacy pages, and generic social/marketing domains.
+    exclude_markers = [
+        "unsubscribe", "optout", "opt-out", "privacy", "helpcenter", "support.",
+        "facebook.com", "twitter.com", "x.com", "instagram.com", "tiktok.com",
+        "googleapis.com", "gstatic.com", "fonts.", "mailtrack", "sendgrid.net/wf/open",
+        "click.", "track.", "pixel.", "/images/", "/image/", "user-content",
+    ]
+    # Never treat an image/asset file (logos, icons, tracking gifs) as the job posting link.
+    image_ext_re = re.compile(r"\.(?:png|jpe?g|gif|svg|webp|ico|bmp)(?:\?|$)", re.I)
+
     scored_urls = []
     for url in urls:
-        score = 0
         url_lower = url.lower()
-        
-        # Higher score for job-related domains/keywords
+        if any(marker in url_lower for marker in exclude_markers):
+            continue
+        if image_ext_re.search(url):
+            continue
+
+        score = 0
+        if job_posting_path_re.search(url):
+            score += 25
         for indicator in job_indicators:
             if indicator in url_lower:
-                score += 10
-        
-        # Lower score for generic domains
-        generic_domains = ["googleapis.com", "fonts.googleapis.com", "linkedin.com", "facebook.com", "twitter.com"]
-        for domain in generic_domains:
-            if domain in url_lower:
-                score -= 20
-        
-        # Prefer shorter URLs (less likely to be tracking links)
-        if len(url) < 100:
+                score += 8
+        if len(url) < 150:
             score += 5
-            
+        if "linkedin.com" in url_lower:
+            score -= 15  # usually a generic company page, not the posting itself
+
         scored_urls.append((score, url))
-    
-    # Sort by score (highest first) and return the best URL
-    scored_urls.sort(key=lambda x: x[0], reverse=True)
-    
-    if scored_urls and scored_urls[0][0] > 0:
-        return scored_urls[0][1]
-    elif scored_urls:
-        return scored_urls[0][1]  # Return first URL even if low score
-    else:
+
+    if not scored_urls:
         return None
+
+    scored_urls.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_url = scored_urls[0]
+    return best_url if best_score > 0 else None
 
 def extract_application_date(msg, subject, body):
     """Extract the actual application date from email content"""
@@ -490,7 +547,7 @@ def find_existing(url=None, company=None, role=None, applied_on=None):
         })
     
     # Third priority: company + role (only if role is meaningful)
-    if company and role and role not in ["(unknown role)", "unknown role", "role", "position"]:
+    if company and role and role not in ["(unknown role)", "(role unclear)", "unknown role", "role", "position"]:
         ors.append({
             "and": [
                 {"property": "Company Name", "title": {"equals": company}},
@@ -635,33 +692,31 @@ def fetch_recent_emails(days_back=None):
         sender = msg.get("From", "").lower()
         subject_lower = subject.lower()
         
-        # ONLY process emails that are clearly job application confirmations
-        # Based on the blue emails you showed me, these are the key patterns:
-        application_confirmations = [
-            r"we.*received.*your.*application",
-            r"thank.*you.*for.*your.*application", 
-            r"application.*received",
-            r"we.*received.*your.*job.*application",
-            r"thank.*you.*for.*your.*online.*submission",
-            r"we.*received.*your.*submission",
-            r"application.*submitted",
-            r"your.*application.*has.*been.*received"
-        ]
-        
+        # ONLY process emails that are clearly job application confirmations.
+        # Uses the module-level bounded-gap patterns (".{0,N}" instead of ".*") since an
+        # unbounded ".*" can span an entire HTML-flattened, single-line email body and
+        # false-positive-match on unrelated sentences (e.g. newsletters, info sessions).
+        application_confirmations = [rx for rx, sts in SUBJECT_RULES if sts == "Applied"]
+
         body = get_text_from_message(msg)
-        
+
         # Check if this is an application confirmation email
-        is_application_email = False
-        for pattern in application_confirmations:
-            if re.search(pattern, subject_lower) or re.search(pattern, body.lower()):
-                is_application_email = True
-                break
-        
+        is_application_email = any(
+            pattern.search(subject) or pattern.search(body)
+            for pattern in application_confirmations
+        )
+
         # Skip if it's not an application confirmation
         if not is_application_email:
             stats["skipped_not_confirmation"] += 1
             continue
-            
+
+        # Skip informational/marketing emails that merely mention "application" in
+        # passing (info sessions, newsletters, job-alert digests, etc.)
+        if NON_APPLICATION_MARKERS.search(subject) or NON_APPLICATION_MARKERS.search(body):
+            stats["skipped_non_job_keywords"] += 1
+            continue
+
         # Additional filtering - skip if it contains non-job keywords
         if any(skip_word in sender.lower() or skip_word in subject_lower for skip_word in [
             "linkedin", "property", "rent", "payment", "maintenance", "verification", 
@@ -674,15 +729,20 @@ def fetch_recent_emails(days_back=None):
         status = derive_status(subject, body)
         company, role = parse_company_and_role(subject, body, sender)
 
-        # Skip if we couldn't extract a meaningful company name
-        if not company or company.lower() in ["unknown", "unknown company", "our", "your", "this", "that", "the"]:
+        # Skip if we couldn't extract a validated, meaningful company name
+        # (parse_company_and_role already validates candidates, so a None here means
+        # nothing trustworthy was found rather than a name that merely looks generic)
+        if not company:
             stats["skipped_no_company"] += 1
             print(f"SKIPPED: No meaningful company name extracted")
             print(f"  Subject: {subject[:100]}...")
             print(f"  Sender: {sender}")
             print("---")
             continue
-        
+
+        if not role:
+            role = "(role unclear)"
+
         stats["processed"] += 1
 
         # Extract application URL - prioritize job-related URLs

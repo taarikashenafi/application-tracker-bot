@@ -1,6 +1,11 @@
 name: notion-email-bot-catchup
 on:
   workflow_dispatch:  # Manual trigger only - for catching up on missed entries
+    inputs:
+      days:
+        description: "Number of days to look back"
+        required: false
+        default: "90"
 
 jobs:
   catchup:
@@ -11,8 +16,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install notion-client==2.5.0 python-dotenv
-      - name: Catch up on missed entries (90 days)
-        run: python bot.py --days 90
+      - name: Catch up on missed entries
+        run: python bot.py --days ${{ github.event.inputs.days }}
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
