@@ -421,13 +421,17 @@ def extract_application_url(body, subject):
         "unsubscribe", "optout", "opt-out", "privacy", "helpcenter", "support.",
         "facebook.com", "twitter.com", "x.com", "instagram.com", "tiktok.com",
         "googleapis.com", "gstatic.com", "fonts.", "mailtrack", "sendgrid.net/wf/open",
-        "click.", "track.", "pixel.",
+        "click.", "track.", "pixel.", "/images/", "/image/", "user-content",
     ]
+    # Never treat an image/asset file (logos, icons, tracking gifs) as the job posting link.
+    image_ext_re = re.compile(r"\.(?:png|jpe?g|gif|svg|webp|ico|bmp)(?:\?|$)", re.I)
 
     scored_urls = []
     for url in urls:
         url_lower = url.lower()
         if any(marker in url_lower for marker in exclude_markers):
+            continue
+        if image_ext_re.search(url):
             continue
 
         score = 0
